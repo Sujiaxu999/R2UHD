@@ -1,194 +1,177 @@
 # R2UHD
 
-R2UHD 是 `relitev17`（revision 171）模型的整理版：架构注册名 **`R2UHDNet`**，
-训练/验证模型 **`R2UHDModel`**，全部代码收敛在 `r2uhd/` 这一个文件夹内。
+R2UHD 的训练、推理与评测代码，支持低光增强、去雾、去模糊、去雨和去雪。
 
-- 单模型、单尺度（`scale: 1`）、RGB 3 通道 uint8 输入输出。
-- 338,147 个参数，整帧推理（4K 输入约 2.2 GiB 显存，RTX 5060 Ti 上 warm 约 0.5 s/帧）。
-- H/4 引导 H/8、H/8 反馈 H/4 的三段双向结构；H/8 上用 16 个原型的互补聚类注意力；
-  整帧聚类注意力，不支持分块推理。
-- 训练：L1 + SSIM + FFT（FP32，AdamW，可选梯度累积）。
-- 测试指标：原 `comput_psnr_ssim.py` 原样使用，一行未改。
+**arXiv:**
 
-## 目录结构
+## 环境安装
 
-```
-r2uhd/
-├── basicsr/                    # 精简后的 BasicSR（只保留 R2UHD 需要的部分）
-│   ├── archs/r2uhd_arch.py     # R2UHDNet
-│   ├── models/r2uhd_model.py   # R2UHDModel
-│   ├── models/base_model.py    # 训练/验证/断点等基础设施
-│   ├── models/lr_scheduler.py  # CosineAnnealingRestartCyclicLR
-│   ├── losses/                 # L1 / MSE / Charbonnier / WeightedTV / FFT
-│   ├── data/                   # PairedImageDataset + 裁剪/增强 + prefetch
-│   ├── utils/                  # registry / options / logger / img / matlab 工具
-│   ├── train.py                # 训练入口
-│   └── test.py                 # 可选的 BasicSR 测试入口（需要 test 数据集段）
-├── options/                    # 六个任务配置
-│   ├── train_r2uhd_haze.yml
-│   ├── train_r2uhd_rain13k.yml
-│   ├── train_r2uhd_uhdrain.yml
-│   ├── train_r2uhd_snow.yml
-│   ├── train_r2uhd_blur.yml
-│   └── train_r2uhd_ll.yml
-├── inference_r2uhd.py          # 测试脚本（由 inference_relitev17.py 改名，逻辑仅改必要处）
-├── comput_psnr_ssim.py         # 原指标实现，原样复制，未修改
-├── train.sh                    # 训练启动脚本（支持多卡、--auto_resume）
-├── test.sh                     # 测试启动脚本（参数直传）
-└── requirements.txt
-```
-
-## 环境
+在独立 Python 环境中安装与本机 CUDA 匹配的 PyTorch 和 torchvision，再安装项目依赖：
 
 ```bash
-# PyTorch 按自己的 CUDA 版本安装（https://pytorch.org）
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-不需要 `pip install` 本仓库：在 `r2uhd/` 目录里运行脚本时，`basicsr` 解析为同目录下的
-本地包。请勿同时把另一份 `basicsr` 装进同一环境，否则可能导入到别的版本。
-`pyiqa` 只用于训练时的验证指标；测试的 PSNR/SSIM 走 `comput_psnr_ssim.py`
-（它的 `import skimage.metrics` 需要 `scikit-image`）。LPIPS 需要可选依赖
-`torchmetrics`，没装时会告警并跳过。
+依赖要求为 PyTorch >= 2.0、torchvision >= 0.15，其余依赖见 `requirements.txt`。
+所有命令均在 `r2uhd/` 目录下运行，直接使用目录中的本地 `basicsr` 包，无需额外安装 BasicSR。
+Python 命令可用于 Windows；`train.sh` 和 `test.sh` 需要 Bash。
+
+## 任务配置
+
+| 任务 | 数据集 | 配置文件 |
+| --- | --- | --- |
+| 去雾 | UHD-Haze | `options/train_r2uhd_haze.yml` |
+| 去雨 | 4K-Rain13k | `options/train_r2uhd_rain13k.yml` |
+| 去雨 | UHD-Rain | `options/train_r2uhd_uhdrain.yml` |
+| 去雪 | UHD-Snow | `options/train_r2uhd_snow.yml` |
+| 去模糊 | UHD-Blur | `options/train_r2uhd_blur.yml` |
+| 低光增强 | UHD-LL | `options/train_r2uhd_ll.yml` |
 
 ## 数据准备
 
-训练使用成对目录，GT 和输入文件名一致：
+按输入图像与清晰图像成对组织数据；配对图像的文件名和尺寸应一致。例如：
 
-```
-datasets/UHD-Haze/train/gt/*.png
-datasets/UHD-Haze/train/input/*.png
+```text
+datasets/UHD-Haze/
+├── train/
+│   ├── input/
+│   └── gt/
+├── val/
+│   ├── input/
+│   └── gt/
+└── test/
+    ├── input/
+    └── gt/
 ```
 
-把 `options/train_r2uhd_*.yml` 里的 `/path/to/train/gt`、`/path/to/val/gt` 等占位路径
-改成自己的目录即可。
+在对应任务的 YAML 中修改下列四项路径，其他配置保持原文件内容。
+目录可以使用数据集原有的 `low/high`、`input/target` 等名称，只需正确设置路径。
+Windows 路径可写为 `D:/datasets/...`。
+
+```yaml
+datasets:
+  train:
+    dataroot_gt: datasets/UHD-Haze/train/gt
+    dataroot_lq: datasets/UHD-Haze/train/input
+  val:
+    dataroot_gt: datasets/UHD-Haze/val/gt
+    dataroot_lq: datasets/UHD-Haze/val/input
+```
+
+训练会从完整图像中随机裁剪；验证使用完整图像。独立测试通过推理命令中的 `-i` 和 `-g` 指定数据，不需要在 YAML 中添加测试集。
 
 ## 训练
 
+以 UHD-Haze 为例：
+
 ```bash
-# 单卡，默认 options/train_r2uhd_haze.yml
-bash train.sh
-
-# 指定任务
-bash train.sh options/train_r2uhd_snow.yml
-
-# 断点续训（自动找最新一对 <iter>.state + net_g_<iter>.pth）
-bash train.sh options/train_r2uhd_snow.yml --auto_resume
-
-# 多卡
-NPROC_PER_NODE=4 bash train.sh options/train_r2uhd_blur.yml
-
-# 等价的 Python 命令（Windows 也可以直接这样跑）
 python -m basicsr.train -opt options/train_r2uhd_haze.yml
 ```
 
-产物在 `experiments/<name>/`：`models/`（`net_g_<iter>.pth`、`net_g_best_<iter>.pth`、
-`net_g_latest.pth`）、`training_states/`、日志与可视化目录。`--auto_resume` 需要与
-`<iter>.state` 同迭代的 `net_g_<iter>.pth` 同时存在。
-
-配置中的几个约定：
-
-| 键 | 行为 |
-|---|---|
-| `train.accumulation_steps` | 梯度累积。loss 按累积步数取平均，每 N 次迭代才 `optimizer.step()`；学习率调度仍按迭代步进。 |
-| `train.optim_d` | R2UHD 没有判别器，此段被忽略（保留是为了旧配置可直接复用）。 |
-| `train.scheduler.type` | 支持 `CosineAnnealingLR` 与 `CosineAnnealingRestartCyclicLR`；六个配置用后者，`periods` 之和小于 `total_iter` 时超出部分保持最后一个 `eta_min`。 |
-| `val.metrics` | 训练验证用 pyiqa 计算；测试脚本另用 `comput_psnr_ssim`（见“指标口径”）。 |
-
-## 测试（推理）
+其他任务使用上表对应的 YAML。也可以使用启动脚本：
 
 ```bash
-# 只推理，不算指标
-bash test.sh -w /path/to/r2uhd_haze.pth -i /path/to/test/input -o results/haze
-
-# 有 GT 时同时算 PSNR/SSIM/LPIPS，并写 inference_summary.json
-bash test.sh -w /path/to/r2uhd_haze.pth -i /path/to/test/input -g /path/to/test/gt \
-    -c options/train_r2uhd_haze.yml -o results/haze
-
-# 也可以用环境变量传参
-WEIGHT=/path/to/r2uhd_haze.pth INPUT=/path/to/test/input OUTPUT=results/haze bash test.sh
-
-# 等价 Python 命令
-python inference_r2uhd.py -i /path/to/test/input -g /path/to/test/gt \
-    -w /path/to/r2uhd_haze.pth -c options/train_r2uhd_haze.yml -o results/haze
+bash train.sh options/train_r2uhd_haze.yml
 ```
 
-- 脚本由 `inference_relitev17.py` 改名而来，只改了模型/配置名与默认输出目录；数值路径
-  与原脚本完全一致（同一权重、同一批图，逐图 PSNR/SSIM 差为 0）。
-- `-c` 省略时，要求权重所在目录（若权重在 `models/` 下则为其上一级目录）里恰好只有
-  一个 yml，脚本自动读取；旧 yml 里写 `ReLiteV17Net` 也能识别（会提示后按 `R2UHDNet`
-  加载，参数布局相同）。
-- PSNR/SSIM 用 `comput_psnr_ssim.calculate_psnr/calculate_ssim`，**固定 Y 通道**
-  （与原脚本一致），`crop_border` 从 yml 的 `val.metrics` 读，可用 `--crop-border` 覆盖。
-- LPIPS 可选（torchmetrics Alex，CPU），`--no-lpips` 关闭；没装 torchmetrics 时会告警跳过。
-- 默认 FP32、padding 到 8 的整数倍（原生几何）；`--amp` 打开 CUDA FP16。
-- 输出：恢复图（保持原扩展名）+ `inference_summary.json`（逐图指标、均值、权重
-  sha256、网络配置、协议说明）。指标和原脚本一样在 **编码前** 对 uint8 数组计算；
-  jpg 输出再解码会带压缩损失，想复现报告里的数字请让输入/输出用 png。
+六个配置文件提供的默认训练设置为：
 
-`test.sh` 只是启动器：所有参数原样转给 `inference_r2uhd.py`，另外支持
-`WEIGHT`、`INPUT`、`GT`、`CONFIG`、`OUTPUT`、`DEVICE`、`PYTHON_BIN` 环境变量。
+| 项目 | 设置 |
+| --- | --- |
+| GPU 数量 | 1 |
+| 随机种子 | 42 |
+| 裁剪尺寸 | 768 × 768 |
+| 每张 GPU 的 batch size | 6 |
+| 梯度累积步数 | 2 |
+| 总迭代数 | 602,000 |
+| 优化器 | AdamW |
+| 初始学习率 | 5e-4 |
+| 权重衰减 | 1e-3 |
 
-## 指标口径
+显存不足时可调整 `datasets.train.batch_size_per_gpu` 和 `train.accumulation_steps`；数据加载进程数通过 `datasets.train.num_worker_per_gpu` 设置。
 
-测试脚本（`comput_psnr_ssim`，固定 Y 通道）和训练验证（pyiqa，按 yml 的
-`test_y_channel`，六个配置是 RGB）**不是同一口径**，数值不能直接对比。
-同一批 4K 恢复图上的实测：
+### 多卡训练
 
-| 指标 | comput_psnr_ssim（测试用） | pyiqa（训练验证用） |
-|---|---|---|
-| Y 通道 PSNR（crop 1） | 30.1648 | 28.8428 |
-| Y 通道 SSIM（crop 1） | 0.9684 | 0.9596 |
-| RGB PSNR（crop 1） | 28.0484 | 28.0484 |
-| RGB SSIM（crop 1） | 0.9471 | 0.9544 |
+在支持配置中 NCCL 后端的 CUDA 环境运行，例如使用两张 GPU：
 
-原因：原实现的 Y 是 MATLAB BT.601 YCbCr（亮度 16–235），比 pyiqa 的 YIQ（0–255）
-正好高 `10·log10((255/219)²) = +1.32 dB`；RGB SSIM 原实现是 11×11×11 的 3D 高斯
-（跨通道卷积），pyiqa 是逐通道 SSIM 后平均。表里的数是在保存的 jpg 输出上重新解码后
-算的，所以比 `inference_summary.json` 里的编码前数值低约 0.01 dB，只用于对比两套实现。
+```bash
+CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 bash train.sh options/train_r2uhd_haze.yml
+```
 
-所以论文/表格数字以测试脚本为准；训练日志只用于看趋势和挑最优 checkpoint
-（`key_metric: psnr` 是 pyiqa 口径）。
+### 训练输出与断点恢复
 
-## 六个任务的配置与权重
+训练输出保存到 `experiments/<name>/`，其中 `<name>` 对应 YAML 的 `name`：
 
-| 配置 | 参考权重文件 | 数据集 |
-|---|---|---|
-| `options/train_r2uhd_haze.yml` | `r2uhd_haze.pth` | UHD-Haze |
-| `options/train_r2uhd_rain13k.yml` | `r2uhd_rain13k.pth` | 4K-Rain13k |
-| `options/train_r2uhd_uhdrain.yml` | `r2uhd_uhdrain.pth` | UHD-Rain |
-| `options/train_r2uhd_snow.yml` | `r2uhd_uhdsnow.pth` | UHD-Snow |
-| `options/train_r2uhd_blur.yml` | `r2uhd_blur.pth` | UHD-Blur |
-| `options/train_r2uhd_ll.yml` | `r2uhd_uhdll.pth` | UHD-LL |
+```text
+experiments/<name>/
+├── models/
+├── training_states/
+├── visualization/
+└── <训练配置>.yml
+```
 
-权重不随代码目录分发，用 `-w` 指定即可。
+自动续训命令：
 
-## 权重兼容性
+```bash
+python -m basicsr.train -opt options/train_r2uhd_haze.yml --auto_resume
+```
 
-- 每个检查点都带 `_architecture_revision = 171`。加载时严格校验 revision 与全部
-  参数名/形状（`strict=True`），不匹配会直接报错，不会静默加载错误的权重。
-- 旧 `relitev17` 训练代码产出的 `.pth` 可以直接加载。
-- 旧的 yml 如果还写着 `network_g.type: ReLiteV17Net`，测试脚本会给出警告并按
-  `R2UHDNet` 处理（参数布局完全相同）；训练脚本要求写 `R2UHDNet`。
+续训需要同时保留 `training_states/<iter>.state` 和同迭代的 `models/net_g_<iter>.pth`。
+只有模型权重时，可通过 YAML 中的 `path.pretrain_network_g` 初始化训练；恢复优化器和学习率调度状态需要训练状态文件。
 
-## 相对 relitev17 的改动
+## 推理与评测
 
-- 命名统一为 R2UHD（arch、model、配置、脚本、默认输出目录）。
-- `basicsr` 只保留 R2UHD 需要的 arch/model/loss/data/utils，删除了 V1–V16、Z1/Z2
-  系列以及 SwinIR/FeMaSR/GAN/感知损失等无关代码。
-- 推理脚本只改名 + 改必要逻辑（模型名、配置校验、默认输出目录），指标计算与协议不变。
-- `train.accumulation_steps` 现在真正生效（旧模型会静默忽略该键）。
-- 修复 `--auto_resume` 只恢复优化器/调度器、不恢复网络权重的问题。
-- 修复 `CosineAnnealingRestartCyclicLR` 在超过 `sum(periods)` 时崩溃的问题。
+权重需自行准备。以下示例假设权重位于 `pretrained_models/r2uhd_haze.pth`，请替换为实际路径。
+`-c` 应指定与权重配套的训练 YAML；训练产物中的已保存配置可用于复现。
 
-## 已知限制
+仅恢复图像：
 
-- 整帧聚类注意力不支持分块推理，显存占用随像素数增长。
-- LPIPS 需要 `torchmetrics`（首次运行还要联网下载 Alex 权重）；缺失时只算 PSNR/SSIM。
-- `comput_psnr_ssim.py` 原样保留，其中 RGB SSIM 分支固定调用 `.cuda()`；测试脚本固定走
-  Y 通道，不会触发该分支。纯 CPU 机器上不要用 `test_y_channel=False` 调用它。
-- `train.sh` / `test.sh` 需要 bash；Windows 上可直接按上面文档里的 Python 命令运行。
+```bash
+python inference_r2uhd.py -i datasets/UHD-Haze/test/input -w pretrained_models/r2uhd_haze.pth -c options/train_r2uhd_haze.yml -o results/haze
+```
+
+提供 GT，同时计算 PSNR、SSIM 和可用的 LPIPS：
+
+```bash
+python inference_r2uhd.py -i datasets/UHD-Haze/test/input -g datasets/UHD-Haze/test/gt -w pretrained_models/r2uhd_haze.pth -c options/train_r2uhd_haze.yml -o results/haze
+```
+
+也可将相同参数传给启动脚本：
+
+```bash
+bash test.sh -i datasets/UHD-Haze/test/input -g datasets/UHD-Haze/test/gt -w pretrained_models/r2uhd_haze.pth -c options/train_r2uhd_haze.yml -o results/haze
+```
+
+恢复图像及 `inference_summary.json` 保存到 `-o` 指定的目录。JSON 包含逐图指标、平均指标、权重 SHA256、配置与评测参数。
+
+| 参数 | 用途 |
+| --- | --- |
+| `-i` | 单张图像或图像目录；目录中的图像不递归读取 |
+| `-g` | 可选 GT 目录，文件名与输入一致；单图输入也可指定 GT 文件 |
+| `-w` | 模型权重路径 |
+| `-c` | 与权重配套的训练 YAML |
+| `-o` | 输出目录 |
+| `--device cpu` | 使用 CPU；默认在 CUDA 可用时使用 GPU |
+| `--amp` | 启用 CUDA FP16 推理；默认 FP32 |
+| `--no-lpips` | 跳过 LPIPS |
+| `--crop-border` | 覆盖 PSNR/SSIM 的边界裁剪像素数 |
+
+输入应为 8 位 RGB 或灰度图像，不支持带 alpha 通道的输入。输出保留输入文件名和扩展名。
+省略 `-c` 时，脚本要求权重目录中恰好有一个 YAML；若权重位于 `models/`，则从其上一级目录查找。
+
+## 复现设置
+
+- 使用与权重配套的 YAML；加载时会严格检查模型权重兼容性。
+- 默认使用 FP32、整图推理，将尺寸补齐到 8 的倍数后裁回原始尺寸。复现时应保持相同的精度和补齐设置；脚本不提供分块推理。
+- 测试 PSNR/SSIM 由 `comput_psnr_ssim.py` 在 Y 通道计算，边界裁剪默认读取 YAML 的 `val.metrics`，六个配置均为 1 像素。
+- 训练验证使用 pyiqa，现有配置的 PSNR/SSIM 为 RGB 口径。报告测试指标时使用独立推理脚本，并保留 `inference_summary.json`。
+- LPIPS 使用 torchmetrics 的 Alex 模型，在 CPU 上计算；首次使用需要下载相关权重。不可用时会跳过 LPIPS，仍计算 PSNR/SSIM。
+- 指标在图像编码前的 uint8 数组上计算。需要从保存图像重新评测时，使用 PNG 等无损格式以避免有损编码影响。
+
+## 致谢
+
+代码基于 [UHDformer](https://github.com/supersupercong/UHDformer) 和 [BasicSR](https://github.com/XPixelGroup/BasicSR)。感谢原作者的开源工作。
 
 ## 许可
 
-代码源自 UHDformer / BasicSR，沿用上级目录 `LICENSE` 的非商用许可。
+许可信息见上级目录的 [LICENSE](../LICENSE)。
