@@ -1,0 +1,119 @@
+# R2UHD task recipe. Replace the /path/to/... dataset roots before training.
+# Datasets: train gt/lq pairs; val gt/lq pairs (evaluation only).
+# Only the generator is trained. train.optim_d is a legacy entry kept for
+# option compatibility (R2UHD has no discriminator); train.accumulation_steps
+# is honoured: the loss is averaged over the micro-batches before one step.
+name: r2uhd-rain13k
+model_type: R2UHDModel
+scale: 1
+num_gpu: 1
+manual_seed: 42
+datasets:
+  train:
+    name: UHD_Rain_Train
+    type: PairedImageDataset
+    dataroot_gt: /path/to/train/gt
+    dataroot_lq: /path/to/train/lq
+    io_backend:
+      type: disk
+    gt_size: 768
+    use_resize_crop: false
+    use_flip: true
+    use_rot: true
+    geometric_augs: true
+    use_shuffle: true
+    batch_size_per_gpu: 6
+    num_worker_per_gpu: 8
+    dataset_enlarge_ratio: 1
+    crop_before_float: true
+    persistent_workers: true
+    prefetch_factor: 2
+    opencv_threads: 1
+    pin_memory: true
+    prefetch_mode: null
+  val:
+    name: UHD_Rain_Valid
+    type: PairedImageDataset
+    dataroot_gt: /path/to/val/gt
+    dataroot_lq: /path/to/val/lq
+    io_backend:
+      type: disk
+    geometric_augs: false
+    use_resize_crop: false
+    use_flip: false
+    use_rot: false
+network_g:
+  type: R2UHDNet
+  widths: [16, 24, 32]
+  num_stages: 3
+  global_depth: 2
+  num_heads: 4
+  prototypes: 16
+  ffn_expansion: 2.0
+  residual_scale: 0.1
+  encoder2_depth: 2
+  detail_depth: 3
+  decoder4_depth: 2
+  decoder2_depth: 3
+path:
+  pretrain_network_g: null
+  strict_load: true
+  resume_state: null
+train:
+  accumulation_steps: 2
+  optim_g:
+    type: AdamW
+    lr: !!float 5e-4
+    weight_decay: !!float 1e-3
+    betas: [0.9, 0.99]
+  optim_d:  # no discriminator in R2UHD: ignored, kept for option compatibility
+    type: Adam
+    lr: !!float 4e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [100, 600000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0005, 0.0000001]
+  total_iter: 602000
+  warmup_iter: -1
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+  pixel_ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.25
+  fft_opt:
+    type: FFTLoss
+    loss_weight: 0.1
+  grad_clip: 0.0
+val:
+  pbar: true
+  use_amp: false
+  val_freq: 50000
+  save_img: false
+  key_metric: psnr
+  metrics:
+    psnr:
+      type: psnr
+      crop_border: 1
+      test_y_channel: false
+    ssim:
+      type: ssim
+      crop_border: 1
+      test_y_channel: false
+    lpips:
+      type: lpips
+      better: lower
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_latest_freq: 5000
+  show_tf_imgs_freq: 5000
+  use_tb_logger: true
+dist_params:
+  backend: nccl
+  port: 16521
+find_unused_parameters: false
