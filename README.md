@@ -160,8 +160,6 @@ Restored images and `inference_summary.json` are saved to the output directory. 
 | `--no-lpips` | Skip LPIPS |
 | `--crop-border` | Override the border crop used for PSNR and SSIM |
 
-Inputs must be 8-bit RGB or grayscale images without an alpha channel. Outputs retain the input filenames and extensions.
-If `-c` is omitted, the checkpoint directory must contain exactly one YAML file. For a checkpoint inside `models/`, the parent directory is searched instead.
 
 ## Acknowledgments
 
