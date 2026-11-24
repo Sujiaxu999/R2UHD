@@ -1,17 +1,3 @@
-"""Whole-frame R2UHD (relitev17 revision171) inference.
-
-Use -w with R2UHD weights and -c with their saved training YAML. If -c is
-omitted, exactly one saved YAML must exist beside the experiment models/ directory.
-The saved YAML defines independent stage depth, clustering, and evaluation settings.
-Weights from other architecture revisions are rejected. Default FP32, native pad8,
-uint8 output.
-Y PSNR/SSIM crop defaults to the saved YAML (explicit CLI override available).
-
-Example (replace the checkpoint and saved-YAML placeholders):
-  python inference_r2uhd.py -i "D:/datasets/UHD-Rain/testing_set/input" -w "YOUR_R2UHD.pth" -c "YOUR_SAVED_TRAINING.yml" -o "results/R2UHD/rain" --device cuda
-Add -g "D:/datasets/UHD-Rain/testing_set/gt" to evaluate paired images.
-Use --no-lpips to skip optional CPU Alex LPIPS; omit --amp for FP32.
-"""
 import argparse
 from collections.abc import Mapping
 import hashlib
